@@ -6,6 +6,7 @@
 #include <MinHook.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -96,9 +97,19 @@ GDML_LogFn g_log = nullptr;
 void* g_log_context = nullptr;
 std::string g_icon_path;
 std::vector<GDML_ModInfo> g_mods;
+void* g_menu_layer = nullptr;
 void* g_mod_list_overlay = nullptr;
 void* g_installed_tab = nullptr;
 void* g_about_tab = nullptr;
+
+// The CCMenuItem selectors are member functions of GDMLButtonTarget, so the
+// target pointer passed to the game must actually point at a
+// GDMLButtonTarget. Previously the MenuLayer pointer was passed instead,
+// which only worked by accident and is undefined behavior.
+GDMLButtonTarget& button_target() {
+    static GDMLButtonTarget target{};
+    return target;
+}
 
 void log_message(GDML_LogLevel level, const char* message) {
     if (g_log != nullptr) {
@@ -227,7 +238,6 @@ void* selector_address(Selector selector) {
 
 void* create_menu_control(
     void* menu,
-    void* target,
     void* selector,
     const char* text,
     float x,
@@ -239,7 +249,9 @@ void* create_menu_control(
     if (sprite == nullptr) {
         return nullptr;
     }
-    void* item = g_cocos.create_menu_item(sprite, nullptr, target, selector);
+    void* item = g_cocos.create_menu_item(
+        sprite, nullptr, &button_target(), selector
+    );
     if (item == nullptr) {
         return nullptr;
     }
@@ -250,8 +262,17 @@ void* create_menu_control(
 }
 
 void show_mod_list(void* menu_layer) {
+    if (menu_layer == nullptr) {
+        return;
+    }
+
     if (g_mod_list_overlay != nullptr) {
         g_cocos.set_visible(g_mod_list_overlay, true);
+        // Restore a predictable tab state instead of whatever was left over.
+        if (g_installed_tab != nullptr && g_about_tab != nullptr) {
+            g_cocos.set_visible(g_installed_tab, true);
+            g_cocos.set_visible(g_about_tab, false);
+        }
         return;
     }
 
@@ -377,15 +398,15 @@ void show_mod_list(void* menu_layer) {
     const Selector about_selector = &GDMLButtonTarget::show_about_tab;
     const Selector close_selector = &GDMLButtonTarget::close_mod_list;
     if (create_menu_control(
-            menu, menu_layer, selector_address(installed_selector), "INSTALLED",
+            menu, selector_address(installed_selector), "INSTALLED",
             width * 0.32f, height - 92.0f
         ) == nullptr ||
         create_menu_control(
-            menu, menu_layer, selector_address(about_selector), "ABOUT",
+            menu, selector_address(about_selector), "ABOUT",
             width * 0.68f, height - 92.0f
         ) == nullptr ||
         create_menu_control(
-            menu, menu_layer, selector_address(close_selector), "CLOSE",
+            menu, selector_address(close_selector), "CLOSE",
             width * 0.5f, 25.0f
         ) == nullptr) {
         log_message(GDML_LOG_ERROR, "Could not create a GDML tab control.");
@@ -475,10 +496,12 @@ void add_gdml_button(void* menu_layer) {
     using Selector = void (GDMLButtonTarget::*)(void*);
     static_assert(sizeof(Selector) == sizeof(void*));
     const Selector selector = &GDMLButtonTarget::open_mod_list;
-    void* selector_address = nullptr;
-    std::memcpy(&selector_address, &selector, sizeof(selector_address));
+    void* selector_ptr = nullptr;
+    std::memcpy(&selector_ptr, &selector, sizeof(selector_ptr));
 
-    void* button = g_cocos.create_menu_item(button_sprite, nullptr, menu_layer, selector_address);
+    void* button = g_cocos.create_menu_item(
+        button_sprite, nullptr, &button_target(), selector_ptr
+    );
     if (button == nullptr) {
         log_message(GDML_LOG_ERROR, "Could not create the GDML menu item.");
         return;
@@ -514,6 +537,14 @@ void add_gdml_button(void* menu_layer) {
 bool __fastcall menu_layer_init_hook(void* menu_layer) {
     const bool initialized = g_original_menu_layer_init(menu_layer);
     if (initialized) {
+        // A new MenuLayer now owns the main menu. Any overlay created for the
+        // previous MenuLayer has been destroyed along with it, so keeping the
+        // old pointers would be a use-after-free the next time the mod list
+        // is opened. Reset them before installing the new button.
+        g_menu_layer = menu_layer;
+        g_mod_list_overlay = nullptr;
+        g_installed_tab = nullptr;
+        g_about_tab = nullptr;
         add_gdml_button(menu_layer);
     }
     return initialized;
@@ -522,7 +553,7 @@ bool __fastcall menu_layer_init_hook(void* menu_layer) {
 } // namespace
 
 void GDMLButtonTarget::open_mod_list(void*) {
-    show_mod_list(this);
+    show_mod_list(g_menu_layer);
 }
 
 void GDMLButtonTarget::close_mod_list(void*) {
@@ -571,7 +602,10 @@ bool gdml_install_game_ui_hooks(
     }
 
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+    // PE headers always live in the first page of the image; reject
+    // implausible e_lfanew values before dereferencing the NT headers.
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
+        dos->e_lfanew > 0x1000) {
         log_message(GDML_LOG_WARNING, "The game executable has an invalid PE header.");
         return false;
     }
@@ -581,7 +615,8 @@ bool gdml_install_game_ui_hooks(
     if (nt->Signature != IMAGE_NT_SIGNATURE ||
         nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
         nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-        nt->OptionalHeader.SizeOfImage < kMenuLayerInitRva + sizeof(kMenuLayerInitSignature)) {
+        nt->OptionalHeader.SizeOfImage < kMenuLayerInitRva + sizeof(kMenuLayerInitSignature) ||
+        nt->OptionalHeader.SizeOfImage < kMenuItemCreateRva + 16) {
         log_message(GDML_LOG_WARNING, "The game executable is not the supported Windows x64 build.");
         return false;
     }

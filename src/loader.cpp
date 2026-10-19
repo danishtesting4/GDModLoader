@@ -1,8 +1,10 @@
 #include "gdml/loader.h"
 
 #include <algorithm>
+#include <cstring>
 #include <new>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -10,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #else
+#include <cerrno>
 #include <dlfcn.h>
 #endif
 
@@ -21,6 +24,21 @@ void log_message(const GDML_HostApi& host, GDML_LogLevel level, const char* mess
     }
 }
 
+void log_formatted(const GDML_HostApi& host, GDML_LogLevel level, const std::string& message) {
+    log_message(host, level, message.c_str());
+}
+
+// Windows file systems are case-insensitive, so "Mod.dll" and "mod.dll" are
+// the same file; comparing byte-for-byte would let the same plugin load twice
+// through differently-cased paths.
+bool same_plugin_path(const std::string& left, const std::string& right) {
+#if defined(_WIN32)
+    return _stricmp(left.c_str(), right.c_str()) == 0;
+#else
+    return left == right;
+#endif
+}
+
 class DynamicLibrary {
 public:
     explicit DynamicLibrary(const char* utf8_path) {
@@ -29,6 +47,7 @@ public:
             CP_UTF8, MB_ERR_INVALID_CHARS, utf8_path, -1, nullptr, 0
         );
         if (required <= 0) {
+            last_error_ = static_cast<unsigned long>(GetLastError());
             return;
         }
 
@@ -36,11 +55,18 @@ public:
         if (MultiByteToWideChar(
                 CP_UTF8, MB_ERR_INVALID_CHARS, utf8_path, -1, wide_path.data(), required
             ) <= 0) {
+            last_error_ = static_cast<unsigned long>(GetLastError());
             return;
         }
         handle_ = LoadLibraryW(wide_path.c_str());
+        if (handle_ == nullptr) {
+            last_error_ = static_cast<unsigned long>(GetLastError());
+        }
 #else
         handle_ = dlopen(utf8_path, RTLD_NOW | RTLD_LOCAL);
+        if (handle_ == nullptr) {
+            last_error_ = static_cast<unsigned long>(errno);
+        }
 #endif
     }
 
@@ -51,12 +77,15 @@ public:
     DynamicLibrary(const DynamicLibrary&) = delete;
     DynamicLibrary& operator=(const DynamicLibrary&) = delete;
 
-    DynamicLibrary(DynamicLibrary&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    DynamicLibrary(DynamicLibrary&& other) noexcept
+        : handle_(std::exchange(other.handle_, nullptr)),
+          last_error_(std::exchange(other.last_error_, 0)) {}
 
     DynamicLibrary& operator=(DynamicLibrary&& other) noexcept {
         if (this != &other) {
             close();
             handle_ = std::exchange(other.handle_, nullptr);
+            last_error_ = std::exchange(other.last_error_, 0);
         }
         return *this;
     }
@@ -66,11 +95,18 @@ public:
     }
 
     void* symbol(const char* name) const {
+        if (handle_ == nullptr) {
+            return nullptr;
+        }
 #if defined(_WIN32)
         return reinterpret_cast<void*>(GetProcAddress(handle_, name));
 #else
         return dlsym(handle_, name);
 #endif
+    }
+
+    unsigned long last_error() const {
+        return last_error_;
     }
 
     void close() {
@@ -91,6 +127,7 @@ private:
 #else
     void* handle_ = nullptr;
 #endif
+    unsigned long last_error_ = 0;
 };
 
 struct LoadedPlugin {
@@ -151,7 +188,7 @@ GDML_Result GDML_CALL gdml_loader_load_plugin(GDML_Loader* loader, const char* u
 
     if (std::any_of(loader->plugins.begin(), loader->plugins.end(),
                     [utf8_path](const LoadedPlugin& plugin) {
-                        return plugin.path == utf8_path;
+                        return same_plugin_path(plugin.path, utf8_path);
                     })) {
         return GDML_ERROR_ALREADY_LOADED;
     }
@@ -159,7 +196,9 @@ GDML_Result GDML_CALL gdml_loader_load_plugin(GDML_Loader* loader, const char* u
     try {
         DynamicLibrary library(utf8_path);
         if (!library) {
-            log_message(loader->host, GDML_LOG_ERROR, "Could not load the plugin library.");
+            log_formatted(loader->host, GDML_LOG_ERROR,
+                          std::string("Could not load the plugin library (system error ") +
+                          std::to_string(library.last_error()) + ").");
             return GDML_ERROR_LOAD_FAILED;
         }
 
@@ -177,7 +216,22 @@ GDML_Result GDML_CALL gdml_loader_load_plugin(GDML_Loader* loader, const char* u
 
         loader->plugins.reserve(loader->plugins.size() + 1);
         LoadedPlugin plugin(utf8_path, std::move(library), shutdown);
-        if (init(&loader->host) == 0) {
+
+        // Plugins are third-party code called through a C ABI. An exception
+        // escaping them would unwind into the host and terminate the process,
+        // so guard the boundary and treat a throw as an init failure.
+        bool init_ok = false;
+        try {
+            init_ok = init(&loader->host) != 0;
+        } catch (const std::exception& error) {
+            log_formatted(loader->host, GDML_LOG_ERROR,
+                          std::string("Plugin init threw an exception: ") + error.what());
+        } catch (...) {
+            log_message(loader->host, GDML_LOG_ERROR,
+                        "Plugin init threw an unknown exception.");
+        }
+
+        if (!init_ok) {
             log_message(loader->host, GDML_LOG_ERROR, "Plugin initialization failed.");
             return GDML_ERROR_PLUGIN_INIT_FAILED;
         }
@@ -196,8 +250,17 @@ void GDML_CALL gdml_loader_unload_all(GDML_Loader* loader) {
     }
 
     for (auto plugin = loader->plugins.rbegin(); plugin != loader->plugins.rend(); ++plugin) {
-        if (plugin->shutdown != nullptr) {
+        if (plugin->shutdown == nullptr) {
+            continue;
+        }
+        try {
             plugin->shutdown();
+        } catch (const std::exception& error) {
+            log_formatted(loader->host, GDML_LOG_ERROR,
+                          std::string("Plugin shutdown threw an exception: ") + error.what());
+        } catch (...) {
+            log_message(loader->host, GDML_LOG_ERROR,
+                        "Plugin shutdown threw an unknown exception.");
         }
     }
     loader->plugins.clear();
