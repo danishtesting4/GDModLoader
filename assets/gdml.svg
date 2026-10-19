@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="frame" x1="74" y1="38" x2="440" y2="474" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a8ff3e"/>
+      <stop offset=".48" stop-color="#25efbb"/>
+      <stop offset="1" stop-color="#25aaff"/>
+    </linearGradient>
+    <linearGradient id="face" x1="111" y1="84" x2="399" y2="431" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#243f73"/>
+      <stop offset="1" stop-color="#111b42"/>
+    </linearGradient>
+    <linearGradient id="cube" x1="159" y1="144" x2="353" y2="357" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d9ff75"/>
+      <stop offset=".56" stop-color="#53f0cb"/>
+      <stop offset="1" stop-color="#54baff"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <path d="M96 30h320l66 66v320l-66 66H96l-66-66V96z" fill="#101632" stroke="#081020" stroke-width="16" stroke-linejoin="round"/>
+  <path d="M103 48h306l55 55v306l-55 55H103l-55-55V103z" fill="url(#frame)" stroke="#d5ff8a" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M117 76h278l41 41v278l-41 41H117l-41-41V117z" fill="url(#face)" stroke="#143051" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M127 92h258" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="7" stroke-linecap="round"/>
+  <path d="m256 131 104 60v120l-104 60-104-60V191z" fill="#122947" stroke="#08172d" stroke-width="17" stroke-linejoin="round"/>
+  <path d="m256 147 90 52v104l-90 52-90-52V199z" fill="url(#cube)" stroke="#d8ff9d" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M290 194h-37v37h-37v37h37v37h55v-37h-18" fill="none" stroke="#173357" stroke-width="21" stroke-linecap="square" stroke-linejoin="bevel"/>
+  <path d="M282 187h-37v37h-37v37h37v37h55v-37h-18" fill="none" stroke="#f6ffdc" stroke-width="12" stroke-linecap="square" stroke-linejoin="bevel"/>
+  <path d="m105 119 8 16 18 3-13 12 3 18-16-9-16 9 3-18-13-12 18-3z" fill="#faffc2"/>
+  <path d="m406 328 6 12 13 2-10 9 2 13-11-7-12 7 3-13-10-9 13-2z" fill="#73fff0"/>
+  <circle cx="396" cy="139" r="7" fill="#a7ff55"/>
+  <circle cx="123" cy="380" r="6" fill="#80faff"/>
+</svg>
